@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Display UEFI boot entries and choose which one will be the next temporary default"""
+
+import re
+import sys
+import os
+if os.name == 'nt':
+    import winreg as reg
+
+from subprocess import call, check_output, DEVNULL
+from collections import OrderedDict
+from contextlib import suppress
+
+
+class BCDBackend():
+
+    entries = None
+    boot_next = None
+    boot_default = None
+
+    _FWBOOTMGR = '{a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}'  # constant GUID of {fwbootmgr}
+
+    def __init__(self):
+        self._load_entries()
+
+    def _load_entries(self):
+        # gather every boot entries
+        self.entries = OrderedDict()
+        with reg.OpenKey(reg.HKEY_LOCAL_MACHINE, r'BCD00000000\Objects') as objects:
+            nb_objects = reg.QueryInfoKey(objects)[0]
+            for i in range(nb_objects):
+                boot_id = reg.EnumKey(objects, i)
+                # check if this isn't an UEFI Firmware entry
+                with reg.OpenKey(objects, boot_id + r'\Description') as desc:
+                    if reg.QueryValueEx(desc, 'Type')[0] not in (0x101fffff, 0x10100002):
+                        continue
+                # 12000004: 'description' field
+                with reg.OpenKey(objects, boot_id + r'\Elements\12000004') as namekey:
+                    name,_ = reg.QueryValueEx(namekey, r'Element')
+                    self.entries[boot_id] = name
+
+        # get boot_default and boot_next if possible
+        with reg.OpenKey(reg.HKEY_LOCAL_MACHINE,
+                         r'BCD00000000\Objects\\' + self._FWBOOTMGR) as fwkey:
+            # 24000001 => 'displayorder' and 24000002 => 'bootsequence'
+            for prop, field in ('boot_default', '24000001'), ('boot_next', '24000002'):
+                with suppress(FileNotFoundError):
+                    with reg.OpenKey(fwkey, r'Elements\\' + field) as key:
+                        value = reg.QueryValueEx(key, 'Element')[0]
+                        setattr(self, prop, value[0])
+
+    def set_boot_next(self, boot_id):
+        print(r'bcdedit.exe /set {fwbootmgr} bootsequence ' + boot_id)
+        return call(r'bcdedit.exe /set {fwbootmgr} bootsequence ' + boot_id)
+
+
+class EfibootmgrBackend():
+
+    entries = None
+    boot_next = None
+    boot_default = None
+
+    def __init__(self):
+        self._load_entries()
+
+    def _load_entries(self):
+        output = (check_output("efibootmgr")
+                  .decode(errors='ignore')
+                  .splitlines())
+        self.entries = OrderedDict()
+        for line in output:
+            m = re.search(r'Boot([0-9A-F]+)[*] +(.*)', line)
+            if m:
+                boot_id, name = m.groups()
+                self.entries[boot_id] = name
+            elif line.startswith("BootOrder:"):
+                self.boot_default = line.split(": ")[1].split(",")[0]
+            elif line.startswith("BootNext:"):
+                self.boot_next = line.split(": ")[1]
+
+    def set_boot_next(self, boot_id):
+        status = call('efibootmgr -q -n'.split() + [boot_id])
+        return status
+
+
+def choose_entry(efi):
+    """Interactive menu to choose the new default entry"""
+    print("-- List of entries --")
+    entries = list(efi.entries.items())
+    for i, (boot_id, entry) in enumerate(entries):
+        print("{:2}. {}".format(i+1, entry))
+
+    if efi.boot_next:
+        current = efi.entries.get(efi.boot_next)
+    elif efi.boot_default:
+        current = efi.entries.get(efi.boot_default)
+    else:
+        current = "none (fallback entry ?)"
+    print("\nCurrent entry:", current)
+
+    while 1:
+        choice = input("Type the number of the entry you want as default: ")
+        try:
+            choice = int(choice)
+        except ValueError:
+            print("You must type the number of the entry.")
+            continue
+        else:
+            if choice < 1 or choice > len(entries):
+                print("There is no entry {}.".format(choice))
+                continue
+            break
+    return entries[choice-1][0]
+
+
+def choose_reboot():
+    """Ask the user if he wants to reboot and use adhoc reboot command"""
+    while True:
+        choice = input("Would you like to reboot now ? [y\\N] ")
+        if choice.lower() == 'n' or choice == '':
+            return
+        elif choice.lower() == 'y':
+            break
+        else:
+            continue
+
+    if os.name == 'nt':
+        call('shutdown /r /t 00')
+    else:
+        call('reboot')
+
+
+def main():
+    if os.name == 'nt':
+        efi = BCDBackend()
+    else:
+        efi = EfibootmgrBackend()
+    boot_next = choose_entry(efi)
+    exit_code = efi.set_boot_next(boot_next)
+    if exit_code == 0:
+        print("Default entry successfully set to '{}'".format(efi.entries[boot_next]))
+    else:
+        print("\nWarning: an unexpected error occurred, the bootnext entry might not be set.")
+    choose_reboot()
+    #input("Press ENTER to continue...")
+
+
+if __name__ == "__main__":
+    main()
