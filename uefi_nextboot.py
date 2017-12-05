@@ -2,14 +2,13 @@
 """Display UEFI boot entries and choose which one will be the next temporary default"""
 
 import re
-import sys
 import os
-if os.name == 'nt':
-    import winreg as reg
-
-from subprocess import call, check_output, DEVNULL
 from collections import OrderedDict
 from contextlib import suppress
+from subprocess import call, check_output
+
+if os.name == 'nt':
+    import winreg as reg
 
 
 class BCDBackend():
@@ -18,7 +17,8 @@ class BCDBackend():
     boot_next = None
     boot_default = None
 
-    _FWBOOTMGR = '{a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}'  # constant GUID of {fwbootmgr}
+    # constant GUID of {fwbootmgr}
+    _FWBOOTMGR = '{a5a30fa2-3d06-4e9f-b5f4-a01df9d1fcba}'
 
     def __init__(self):
         self._load_entries()
@@ -30,24 +30,28 @@ class BCDBackend():
             nb_objects = reg.QueryInfoKey(objects)[0]
             for i in range(nb_objects):
                 boot_id = reg.EnumKey(objects, i)
-                # check if this isn't an UEFI Firmware entry
+                # skip if this isn't an UEFI Firmware entry
                 with reg.OpenKey(objects, boot_id + r'\Description') as desc:
+                    # 0x10100002 => {bootmgr} (Windows Boot Manager)
+                    # 0x101fffff => other uefi entries
                     if reg.QueryValueEx(desc, 'Type')[0] not in (0x101fffff, 0x10100002):
                         continue
                 # 12000004: 'description' field
                 with reg.OpenKey(objects, boot_id + r'\Elements\12000004') as namekey:
-                    name,_ = reg.QueryValueEx(namekey, r'Element')
+                    name, _ = reg.QueryValueEx(namekey, r'Element')
                     self.entries[boot_id] = name
 
         # get boot_default and boot_next if possible
         with reg.OpenKey(reg.HKEY_LOCAL_MACHINE,
                          r'BCD00000000\Objects\\' + self._FWBOOTMGR) as fwkey:
-            # 24000001 => 'displayorder' and 24000002 => 'bootsequence'
-            for prop, field in ('boot_default', '24000001'), ('boot_next', '24000002'):
+            def try_get_field_value(field):
                 with suppress(FileNotFoundError):
                     with reg.OpenKey(fwkey, r'Elements\\' + field) as key:
-                        value = reg.QueryValueEx(key, 'Element')[0]
-                        setattr(self, prop, value[0])
+                        values, _ = reg.QueryValueEx(key, 'Element')
+                        return values[0]
+            # 24000001 => 'displayorder' and 24000002 => 'bootsequence'
+            self.boot_default = try_get_field_value('24000001')
+            self.boot_next = try_get_field_value('24000002')
 
     def set_boot_next(self, boot_id):
         print(r'bcdedit.exe /set {fwbootmgr} bootsequence ' + boot_id)
@@ -86,7 +90,10 @@ class EfibootmgrBackend():
 def choose_entry(efi):
     """Interactive menu to choose the new default entry"""
     print("-- List of entries --")
-    entries = list(efi.entries.items())
+    entries = sorted(
+        efi.entries.items(),
+        key=lambda x: x[1].lower()
+    )
     for i, (boot_id, entry) in enumerate(entries):
         print("{:2}. {}".format(i+1, entry))
 
@@ -138,11 +145,14 @@ def main():
     boot_next = choose_entry(efi)
     exit_code = efi.set_boot_next(boot_next)
     if exit_code == 0:
-        print("Default entry successfully set to '{}'".format(efi.entries[boot_next]))
+        print(
+            "Default entry successfully set to '{}'"
+            .format(efi.entries[boot_next])
+        )
     else:
         print("\nWarning: an unexpected error occurred, the bootnext entry might not be set.")
     choose_reboot()
-    #input("Press ENTER to continue...")
+    # input("Press ENTER to continue...")
 
 
 if __name__ == "__main__":
