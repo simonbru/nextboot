@@ -3,6 +3,7 @@
 
 import re
 import os
+import sys
 from collections import OrderedDict
 from contextlib import suppress
 from subprocess import call, check_output
@@ -87,7 +88,7 @@ class EfibootmgrBackend():
         return status
 
 
-def choose_entry(efi):
+def choose_entry_legacy(efi):
     """Interactive menu to choose the new default entry"""
     print("-- List of entries --")
     entries = sorted(
@@ -120,6 +121,41 @@ def choose_entry(efi):
     return entries[choice-1][0]
 
 
+def choose_entry(efi):
+    """Interactive menu to choose the new default entry using `pick`"""
+    entries = sorted(
+        efi.entries.items(),
+        key=lambda x: x[1].lower()
+    )
+    entries_ids = [boot_id for boot_id, _ in entries]
+
+    if efi.boot_next:
+        current_index = entries_ids.index(efi.boot_next)
+    elif efi.boot_default:
+        current_index = entries_ids.index(efi.boot_default)
+    else:
+        current_index = 0
+
+    import pick
+    picker = pick.Picker(
+        options=[entry_name for _, entry_name in entries],
+        title="Choose next boot entry (press 'q' to abort)",
+        indicator='=>',
+        default_index=current_index,
+    )
+    abort_keys = [
+        ord('q'),
+        27,  # Escape
+        3,  # CTRL + C
+    ]
+    for key in abort_keys:
+        picker.register_custom_handler(key, lambda picker: (None, None))
+    _, index = picker.start()
+    if index is None:
+        sys.exit(0)
+    return entries_ids[index]
+
+
 def choose_reboot():
     """Ask the user if he wants to reboot and use adhoc reboot command"""
     while True:
@@ -142,7 +178,11 @@ def main():
         efi = BCDBackend()
     else:
         efi = EfibootmgrBackend()
-    boot_next = choose_entry(efi)
+
+    try:
+        boot_next = choose_entry(efi)
+    except ImportError:
+        boot_next = choose_entry_legacy(efi)
     exit_code = efi.set_boot_next(boot_next)
     if exit_code == 0:
         print(
