@@ -74,7 +74,7 @@ class EfibootmgrBackend():
                   .splitlines())
         self.entries = OrderedDict()
         for line in output:
-            m = re.search(r'Boot([0-9A-F]+)[*] +(.*)', line)
+            m = re.search(r'Boot([0-9A-F]+)[*] +(.*)\t.*', line)
             if m:
                 boot_id, name = m.groups()
                 self.entries[boot_id] = name
